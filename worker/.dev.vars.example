@@ -1,0 +1,20 @@
+# EasyCam Worker 環境變數範本
+# 複製此檔案為 .dev.vars 並填入你的值
+# .dev.vars 已加入 .gitignore，不會上傳到 GitHub
+
+# LINE Messaging API
+# 申請：https://developers.line.biz/
+LINE_CHANNEL_ACCESS_TOKEN=your-line-channel-access-token
+LINE_USER_ID=your-line-user-id
+
+# Telegram Bot
+# 透過 @BotFather 建立 Bot 取得 Token
+# Chat ID 可透過 @userinfobot 取得
+TELEGRAM_BOT_TOKEN=your-telegram-bot-token
+TELEGRAM_CHAT_ID=your-telegram-chat-id
+
+# HiveMQ Cloud（MQTT 指令轉發）
+# 免費申請：https://www.hivemq.com/cloud/
+HIVEMQ_URL=https://your-cluster-id.s1.eu.hivemq.cloud:8443
+HIVEMQ_USER=your-mqtt-username
+HIVEMQ_PASSWORD=your-mqtt-password

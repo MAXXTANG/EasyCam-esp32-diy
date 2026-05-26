@@ -1,0 +1,23 @@
+name = "easycam-notify"
+main = "src/worker.js"
+compatibility_date = "2024-01-01"
+
+# KV 儲存空間（暫存照片供 LINE 讀取）
+# 建立方式：npx wrangler kv namespace create IMAGES
+[[kv_namespaces]]
+binding = "IMAGES"
+id = "your-kv-namespace-id"
+preview_id = "your-kv-namespace-id"
+
+# ============================
+# 敏感設定請放在 .dev.vars（本機開發）
+# 或 wrangler secret（正式部署）
+# ============================
+# 以下變數需要設定（參考 .dev.vars.example）：
+#   LINE_CHANNEL_ACCESS_TOKEN
+#   LINE_USER_ID
+#   TELEGRAM_BOT_TOKEN
+#   TELEGRAM_CHAT_ID
+#   HIVEMQ_URL
+#   HIVEMQ_USER
+#   HIVEMQ_PASSWORD
