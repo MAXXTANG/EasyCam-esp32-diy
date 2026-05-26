@@ -1,5 +1,6 @@
 # ============================
-# 敏感設定檔（含 API Token、密碼）
+# Sensitive config files (API tokens, passwords)
+# 敏感設定檔（API Token、密碼）
 # ============================
 motion_monitor/config.h
 worker/.dev.vars
@@ -20,7 +21,7 @@ worker/node_modules/
 worker/package-lock.json
 
 # ============================
-# Wrangler（Cloudflare）
+# Wrangler (Cloudflare)
 # ============================
 worker/.wrangler/
 
@@ -34,13 +35,14 @@ build/
 .vscode/
 
 # ============================
-# Claude / 開發筆記（個人用，不上傳）
+# Dev notes (personal, not for repo)
+# 開發筆記（個人用，不上傳）
 # ============================
 CLAUDE.md
 部署說明.md
 
 # ============================
-# 其他
+# Misc
 # ============================
 *.pptx
 截圖*

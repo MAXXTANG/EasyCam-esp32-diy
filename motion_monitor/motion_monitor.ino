@@ -1,14 +1,16 @@
 /*
+ * ESP32-CAM EasyCam Motion Monitor
  * ESP32-CAM EasyCam 感應監視器
- * NMKing 小霸王實驗室 EasyCam 擴充版
  *
- * 功能：
- * 1. 畫面差異偵測 → 拍3張選最清楚1張 → 上傳雲端 → LINE + Telegram 通知
- * 2. MQTT 遠端指令 → 即時拍照回傳
- * 3. IO33 LED 狀態指示
+ * Features / 功能：
+ * 1. Frame difference detection → burst 3 shots, pick best → upload → LINE + Telegram
+ *    畫面差異偵測 → 拍3張選最清楚1張 → 上傳雲端 → LINE + Telegram 通知
+ * 2. Remote commands via MQTT/HTTP polling → instant capture
+ *    MQTT/HTTP 遠端指令 → 即時拍照回傳
+ * 3. IO33 LED status indicator / IO33 LED 狀態指示
  *
- * 開發板選擇：ESP32 Wrover Module (帶USB)
- * Partition Scheme：Huge APP (3MB No OTA/1MB SPIFFS)
+ * Board: ESP32 Wrover Module (with USB) / 開發板：ESP32 Wrover Module (帶USB)
+ * Partition Scheme: Huge APP (3MB No OTA/1MB SPIFFS)
  */
 
 #include "esp_camera.h"
@@ -21,10 +23,11 @@
 #include <DNSServer.h>
 #include "soc/soc.h"
 #include "soc/rtc_cntl_reg.h"
-#include "config.h"             // 敏感設定（複製 config.example.h → config.h 並填入你的資料）
+#include "config.h"             // Sensitive config (copy config.example.h → config.h and fill in your values)
+                                // 敏感設定（複製 config.example.h → config.h 並填入你的資料）
 
 // ============================
-// 從 config.h 載入設定
+// Load settings from config.h / 從 config.h 載入設定
 // ============================
 const char* DEFAULT_WIFI_SSID     = WIFI_SSID;
 const char* DEFAULT_WIFI_PASSWORD = WIFI_PASSWORD;
@@ -41,36 +44,37 @@ const char* MQTT_TOPIC_CMD = MQTT_TOPIC;
 const char* MQTT_CLIENT_ID = MQTT_CLIENT;
 
 // ============================
-// 硬體設定（EasyCam 擴充版）
+// Hardware config (EasyCam breakout board) / 硬體設定（EasyCam 擴充版）
 // ============================
-#define LED_PIN        33    // NMKCAM LED（不是原版的IO4）
-#define BUTTON_PIN     3     // 拍照按鈕
-#define STATUS_LED_CHANNEL 4 // Core 2.x LEDC 需要固定通道，避開相機 XCLK 的 channel 0
+#define LED_PIN        33    // NMKCAM LED (not the original IO4) / NMKCAM LED（不是原版的IO4）
+#define BUTTON_PIN     3     // Capture button / 拍照按鈕
+#define STATUS_LED_CHANNEL 4 // Core 2.x LEDC needs fixed channel, avoid camera XCLK channel 0
 
 // ============================
-// 偵測參數（可調整）
+// Detection parameters (tunable) / 偵測參數（可調整）
 // ============================
-#define MOTION_THRESHOLD    8     // 像素差異門檻（0-255）
-#define MOTION_PERCENT      3     // 變化區塊百分比門檻（%）
-#define MOTION_STRONG_DIFF  22    // 強變化區塊門檻，捕捉小範圍人體移動
-#define MOTION_STRONG_BLOCKS 8    // 強變化區塊數達標即觸發
-#define PHOTO_SCORE_SIZE_WEIGHT 0.7     // JPEG 大小權重（KB）
-#define PHOTO_SCORE_MOTION_WEIGHT 3.0   // 變化區域比例權重
-#define PHOTO_SCORE_STRONG_WEIGHT 0.35  // 強變化區塊權重
-#define COOLDOWN_MS         15000 // 警報事件結束後短冷卻（毫秒）= 15 秒
-#define ALARM_SEQUENCE_SHOTS 2    // 門口警報：一次事件保留幾張記錄
-#define ALARM_SEQUENCE_INTERVAL_MS 5000 // 警報事件補拍間隔（毫秒）
-#define DETECT_WIDTH        320   // 偵測用解析度寬
-#define DETECT_HEIGHT       240   // 偵測用解析度高
-#define BLOCK_SIZE          8     // 比對區塊大小（8x8）
-#define MOTION_CONFIRM_FRAMES 1   // ESP32-CAM 偵測幀率低，人體走過時一幀達標就觸發
-#define MOTION_CONFIRM_DELAY_MS 800 // 第一幀可疑後，延遲再確認一次，降低光線/雜訊誤觸
-#define GLOBAL_CHANGE_IGNORE_PERCENT 85 // 全畫面大幅變動多半是曝光/光線變化
-#define MOTION_STARTUP_GRACE_MS 10000 // 開機後先讓曝光/白平衡穩定
-#define ENABLE_MQTT_COMMANDS 0    // 目前以 Worker /poll + KV 為主要指令通道
+#define MOTION_THRESHOLD    8     // Pixel diff threshold (0-255) / 像素差異門檻
+#define MOTION_PERCENT      3     // Changed block percentage threshold (%) / 變化區塊百分比門檻
+#define MOTION_STRONG_DIFF  22    // Strong change threshold, catches small human movement / 強變化門檻
+#define MOTION_STRONG_BLOCKS 8    // Trigger if this many strong blocks reached / 強變化區塊數達標即觸發
+#define PHOTO_SCORE_SIZE_WEIGHT 0.7     // JPEG size weight (KB) / JPEG 大小權重
+#define PHOTO_SCORE_MOTION_WEIGHT 3.0   // Change area ratio weight / 變化區域比例權重
+#define PHOTO_SCORE_STRONG_WEIGHT 0.35  // Strong change block weight / 強變化區塊權重
+#define COOLDOWN_MS         15000 // Cooldown after alarm event (ms) = 15s / 警報後冷卻
+#define ALARM_SEQUENCE_SHOTS 2    // Doorbell alarm: photos per event / 門口警報：一次事件幾張
+#define ALARM_SEQUENCE_INTERVAL_MS 5000 // Interval between alarm shots (ms) / 警報補拍間隔
+#define DETECT_WIDTH        320   // Detection resolution width / 偵測用解析度寬
+#define DETECT_HEIGHT       240   // Detection resolution height / 偵測用解析度高
+#define BLOCK_SIZE          8     // Comparison block size (8x8) / 比對區塊大小
+#define MOTION_CONFIRM_FRAMES 1   // Low FPS on ESP32-CAM; one frame is enough / 一幀達標就觸發
+#define MOTION_CONFIRM_DELAY_MS 800 // Delay before second-stage confirm / 延遲再確認，降低誤觸
+#define GLOBAL_CHANGE_IGNORE_PERCENT 85 // Ignore full-frame changes (likely exposure shift) / 忽略全畫面變化
+#define MOTION_STARTUP_GRACE_MS 10000 // Grace period after boot for exposure to stabilize / 開機曝光穩定期
+#define ENABLE_MQTT_COMMANDS 0    // Currently using Worker /poll + KV as main command channel
+                                  // 目前以 Worker /poll + KV 為主要指令通道
 
 // ============================
-// NMKCAM (ESP32-CAM) 相機腳位
+// NMKCAM (ESP32-CAM) camera pin definitions / 相機腳位
 // ============================
 #define PWDN_GPIO_NUM     32
 #define RESET_GPIO_NUM    -1
@@ -90,26 +94,26 @@ const char* MQTT_CLIENT_ID = MQTT_CLIENT;
 #define PCLK_GPIO_NUM     22
 
 // ============================
-// 全域變數
+// Global variables / 全域變數
 // ============================
 WiFiClientSecure espClient;
 PubSubClient mqttClient(espClient);
 Preferences preferences;
 WebServer webServer(80);
 DNSServer dnsServer;
-bool apModeActive = false;           // 是否在 AP 設定模式
+bool apModeActive = false;           // Whether in AP setup mode / 是否在 AP 設定模式
 
-// NVS 儲存的 WiFi 設定
+// WiFi config stored in NVS / NVS 儲存的 WiFi 設定
 char storedSSID[64] = "";
 char storedPassword[64] = "";
 
-uint8_t* prevFrame = NULL;          // 前一幀（縮小後灰階）
-int blockCols, blockRows;           // 區塊網格大小
-unsigned long lastMotionTime = 0;   // 上次偵測時間
-bool motionDetectionEnabled = true; // 偵測開關
-unsigned long bootTime = 0;         // 開機時間（millis）
+uint8_t* prevFrame = NULL;          // Previous frame (downscaled grayscale) / 前一幀（縮小後灰階）
+int blockCols, blockRows;           // Block grid dimensions / 區塊網格大小
+unsigned long lastMotionTime = 0;   // Last detection time / 上次偵測時間
+bool motionDetectionEnabled = true; // Detection toggle / 偵測開關
+unsigned long bootTime = 0;         // Boot time (millis) / 開機時間
 
-// 排程靜音時段
+// Scheduled quiet hours / 排程靜音時段
 bool scheduleEnabled = false;
 int quietStartHour = -1;
 int quietStartMin = 0;
@@ -117,7 +121,7 @@ int quietEndHour = -1;
 int quietEndMin = 0;
 
 // ============================
-// 前向宣告（函式定義在後面）
+// Forward declarations / 前向宣告
 // ============================
 void captureAndUpload(const char* trigger);
 void captureAlarmSequence();
@@ -155,7 +159,7 @@ camera_fb_t* getCameraFrameWithRetry(int attempts, int delayMs, const char* cont
   for (int i = 0; i < attempts; i++) {
     camera_fb_t* fb = esp_camera_fb_get();
     if (fb) return fb;
-    Serial.printf("[WARN] %s 取幀失敗，重試 %d/%d\n", context, i + 1, attempts);
+    Serial.printf("[WARN] %s frame capture failed, retry %d/%d\n", context, i + 1, attempts);
     delay(delayMs);
   }
   return NULL;
@@ -165,7 +169,8 @@ float scorePhotoCandidate(camera_fb_t* fb, float* changePercent, int* strongBloc
   *changePercent = 0.0;
   *strongBlocks = 0;
 
-  // 檔案大小仍是清晰度的低成本近似；沒有偵測基準時（例如手動拍照）就以它為主。
+  // File size is a low-cost proxy for sharpness; used as primary score when no baseline exists
+  // 檔案大小是清晰度的低成本近似；沒有偵測基準時以它為主
   float sizeScore = (float)fb->len / 1024.0;
   if (!prevFrame) {
     return sizeScore * PHOTO_SCORE_SIZE_WEIGHT;
@@ -174,13 +179,13 @@ float scorePhotoCandidate(camera_fb_t* fb, float* changePercent, int* strongBloc
   int totalBlocks = blockCols * blockRows;
   uint8_t* candidateFrame = (uint8_t*)ps_malloc(totalBlocks);
   if (!candidateFrame) {
-    Serial.println("[WARN] 照片評分記憶體不足，退回檔案大小評分");
+    Serial.println("[WARN] Score: out of memory, falling back to size score");
     return sizeScore * PHOTO_SCORE_SIZE_WEIGHT;
   }
 
   if (!decodeJpegToGrayBlocks(fb, candidateFrame)) {
     free(candidateFrame);
-    Serial.println("[WARN] 照片評分解碼失敗，退回檔案大小評分");
+    Serial.println("[WARN] Score: decode failed, falling back to size score");
     return sizeScore * PHOTO_SCORE_SIZE_WEIGHT;
   }
 
@@ -203,7 +208,7 @@ float scorePhotoCandidate(camera_fb_t* fb, float* changePercent, int* strongBloc
 }
 
 // ============================
-// 相機初始化
+// Camera initialization / 相機初始化
 // ============================
 bool initCamera() {
   camera_config_t config;
@@ -225,39 +230,40 @@ bool initCamera() {
   config.pin_sccb_scl = SIOC_GPIO_NUM;
   config.pin_pwdn     = PWDN_GPIO_NUM;
   config.pin_reset    = RESET_GPIO_NUM;
-  config.xclk_freq_hz = 10000000;  // 10MHz（降低以減少 DMA 壓力）
+  config.xclk_freq_hz = 10000000;  // 10MHz (reduced to lower DMA pressure)
   config.pixel_format = PIXFORMAT_JPEG;
   config.grab_mode    = CAMERA_GRAB_WHEN_EMPTY;
 
-  // 使用 VGA（640x480），在 ESP32 Core 3.x 下最穩定
+  // Use VGA (640x480), most stable on ESP32 Core 3.x
   config.frame_size   = FRAMESIZE_VGA;   // 640x480
-  config.jpeg_quality = 15;              // 較高壓縮，加速上傳
+  config.jpeg_quality = 15;              // Higher compression for faster upload
   config.fb_count     = 2;
   config.fb_location  = CAMERA_FB_IN_PSRAM;
 
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
-    Serial.printf("[ERROR] 相機初始化失敗: 0x%x\n", err);
+    Serial.printf("[ERROR] Camera init failed: 0x%x\n", err);
     return false;
   }
 
+  // NMKCAM specific: disable auto white balance dithering (reduces false triggers)
   // NMKCAM 特有設定：關閉自動白平衡抖動（減少誤觸發）
   sensor_t* s = esp_camera_sensor_get();
   s->set_whitebal(s, 1);
   s->set_awb_gain(s, 1);
   s->set_wb_mode(s, 0);
 
-  Serial.println("[OK] 相機初始化完成");
+  Serial.println("[OK] Camera initialized");
   return true;
 }
 
 // ============================
-// 切換相機解析度
+// Switch camera resolution / 切換相機解析度
 // ============================
 void setCameraFrameSize(framesize_t size) {
   sensor_t* s = esp_camera_sensor_get();
   s->set_framesize(s, size);
-  // 丟棄前幾幀讓感測器穩定
+  // Discard first few frames to let sensor stabilize / 丟棄前幾幀讓感測器穩定
   for (int i = 0; i < 2; i++) {
     camera_fb_t* fb = esp_camera_fb_get();
     if (fb) esp_camera_fb_return(fb);
@@ -266,10 +272,10 @@ void setCameraFrameSize(framesize_t size) {
 }
 
 // ============================
-// 從 NVS 載入 WiFi 設定
+// Load WiFi config from NVS / 從 NVS 載入 WiFi 設定
 // ============================
 void loadWiFiConfig() {
-  preferences.begin("easycam", true);  // 唯讀
+  preferences.begin("easycam", true);  // Read-only / 唯讀
   String ssid = preferences.getString("ssid", "");
   String pass = preferences.getString("password", "");
   preferences.end();
@@ -277,44 +283,44 @@ void loadWiFiConfig() {
   if (ssid.length() > 0) {
     ssid.toCharArray(storedSSID, sizeof(storedSSID));
     pass.toCharArray(storedPassword, sizeof(storedPassword));
-    Serial.printf("[WiFi] 從 NVS 載入: SSID=%s\n", storedSSID);
+    Serial.printf("[WiFi] Loaded from NVS: SSID=%s\n", storedSSID);
   } else {
-    // NVS 沒有存過，使用預設值
+    // NVS empty, use defaults / NVS 沒有存過，使用預設值
     strncpy(storedSSID, DEFAULT_WIFI_SSID, sizeof(storedSSID));
     strncpy(storedPassword, DEFAULT_WIFI_PASSWORD, sizeof(storedPassword));
-    Serial.println("[WiFi] NVS 無設定，使用預設值");
+    Serial.println("[WiFi] No NVS config, using defaults");
   }
 }
 
 // ============================
-// 儲存 WiFi 設定到 NVS
+// Save WiFi config to NVS / 儲存 WiFi 設定到 NVS
 // ============================
 void saveWiFiConfig(const char* ssid, const char* password) {
-  preferences.begin("easycam", false);  // 讀寫
+  preferences.begin("easycam", false);  // Read-write / 讀寫
   preferences.putString("ssid", ssid);
   preferences.putString("password", password);
   preferences.end();
-  Serial.printf("[WiFi] 已儲存新設定: SSID=%s\n", ssid);
+  Serial.printf("[WiFi] Saved new config: SSID=%s\n", ssid);
 }
 
 // ============================
-// 清除 NVS 中的 WiFi 設定（進入 AP 模式）
+// Clear NVS WiFi config (enter AP mode) / 清除 NVS WiFi 設定
 // ============================
 void clearWiFiConfig() {
   preferences.begin("easycam", false);
   preferences.remove("ssid");
   preferences.remove("password");
   preferences.end();
-  Serial.println("[WiFi] 已清除 NVS 設定");
+  Serial.println("[WiFi] NVS config cleared");
 }
 
 // ============================
-// AP 設定模式 — WiFi 設定網頁
+// AP Setup Mode — WiFi config web page / AP 設定模式 — WiFi 設定網頁
 // ============================
 const char AP_HTML[] PROGMEM = R"rawliteral(
 <!DOCTYPE html><html><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>EasyCam WiFi 設定</title>
+<title>EasyCam WiFi Setup</title>
 <style>
 body{font-family:sans-serif;max-width:400px;margin:40px auto;padding:0 20px;background:#1a1a2e;color:#eee}
 h2{color:#e94560;text-align:center}
@@ -324,19 +330,19 @@ button:hover{background:#c23152}
 .info{font-size:13px;color:#aaa;text-align:center;margin-top:20px}
 #nets{margin:8px 0}
 </style></head><body>
-<h2>📷 EasyCam WiFi 設定</h2>
+<h2>📷 EasyCam WiFi Setup</h2>
 <form action="/save" method="POST">
-<label>WiFi 網路名稱 (SSID)</label>
+<label>WiFi Network (SSID)</label>
 <div id="nets"></div>
-<input type="text" name="ssid" id="ssid" placeholder="輸入或從上方選擇" required>
-<label>WiFi 密碼</label>
-<input type="password" name="password" placeholder="輸入 WiFi 密碼" required>
-<button type="submit">💾 儲存並重新連線</button>
+<input type="text" name="ssid" id="ssid" placeholder="Enter or select from above" required>
+<label>WiFi Password</label>
+<input type="password" name="password" placeholder="Enter WiFi password" required>
+<button type="submit">💾 Save & Reconnect</button>
 </form>
-<p class="info">設定完成後 EasyCam 將自動重啟並連線到新的 WiFi。<br>如果連線失敗，會再次開啟此設定頁面。</p>
+<p class="info">After saving, EasyCam will reboot and connect to the new WiFi.<br>If connection fails, this setup page will reappear.</p>
 <script>
 fetch('/scan').then(r=>r.json()).then(nets=>{
-  let h='<select onchange="document.getElementById(\'ssid\').value=this.value"><option value="">-- 選擇偵測到的網路 --</option>';
+  let h='<select onchange="document.getElementById(\'ssid\').value=this.value"><option value="">-- Select a detected network --</option>';
   nets.forEach(n=>h+='<option value="'+n.ssid+'">'+n.ssid+' ('+n.rssi+'dBm)</option>');
   h+='</select>';
   document.getElementById('nets').innerHTML=h;
@@ -354,21 +360,22 @@ void startAPMode() {
 
   IPAddress apIP = WiFi.softAPIP();
   Serial.println("\n=============================");
-  Serial.println("  📡 WiFi 設定模式");
-  Serial.printf("  AP 名稱: %s\n", AP_SSID);
-  Serial.printf("  AP 密碼: %s\n", AP_PASSWORD);
-  Serial.printf("  設定網址: http://%s\n", apIP.toString().c_str());
+  Serial.println("  📡 WiFi Setup Mode");
+  Serial.printf("  AP Name: %s\n", AP_SSID);
+  Serial.printf("  AP Password: %s\n", AP_PASSWORD);
+  Serial.printf("  Setup URL: http://%s\n", apIP.toString().c_str());
   Serial.println("=============================\n");
 
+  // DNS intercept — redirect all URLs to setup page
   // DNS 攔截 — 所有網址都導到設定頁面
   dnsServer.start(53, "*", apIP);
 
-  // 設定頁面
+  // Setup page / 設定頁面
   webServer.on("/", HTTP_GET, []() {
     webServer.send(200, "text/html", AP_HTML);
   });
 
-  // WiFi 掃描 API
+  // WiFi scan API / WiFi 掃描 API
   webServer.on("/scan", HTTP_GET, []() {
     int n = WiFi.scanNetworks();
     String json = "[";
@@ -380,7 +387,7 @@ void startAPMode() {
     webServer.send(200, "application/json", json);
   });
 
-  // 儲存設定
+  // Save config / 儲存設定
   webServer.on("/save", HTTP_POST, []() {
     String newSSID = webServer.arg("ssid");
     String newPass = webServer.arg("password");
@@ -389,14 +396,15 @@ void startAPMode() {
       saveWiFiConfig(newSSID.c_str(), newPass.c_str());
       webServer.send(200, "text/html",
         "<html><head><meta charset='utf-8'></head><body style='font-family:sans-serif;text-align:center;padding:60px;background:#1a1a2e;color:#eee'>"
-        "<h2>✅ 設定已儲存！</h2><p>EasyCam 將在 3 秒後重新啟動...</p></body></html>");
+        "<h2>✅ Settings saved!</h2><p>EasyCam will reboot in 3 seconds...</p></body></html>");
       delay(3000);
       ESP.restart();
     } else {
-      webServer.send(400, "text/html", "<h2>SSID 不能為空</h2>");
+      webServer.send(400, "text/html", "<h2>SSID cannot be empty</h2>");
     }
   });
 
+  // Redirect all unknown paths to setup page (Captive Portal)
   // 所有未知路徑也導到設定頁（Captive Portal）
   webServer.onNotFound([]() {
     webServer.sendHeader("Location", "/", true);
@@ -405,13 +413,13 @@ void startAPMode() {
 
   webServer.begin();
 
-  // LED 快閃表示 AP 模式
-  Serial.println("[AP] 等待使用者設定 WiFi...");
+  // LED blink to indicate AP mode / LED 快閃表示 AP 模式
+  Serial.println("[AP] Waiting for user to configure WiFi...");
   while (apModeActive) {
     dnsServer.processNextRequest();
     webServer.handleClient();
 
-    // LED 雙閃表示 AP 模式
+    // Double blink for AP mode / LED 雙閃表示 AP 模式
     static unsigned long lastBlink = 0;
     if (millis() - lastBlink > 500) {
       lastBlink = millis();
@@ -424,13 +432,13 @@ void startAPMode() {
 }
 
 // ============================
-// WiFi 連線（帶 NVS + AP 備援）
+// WiFi connection (with NVS + AP fallback) / WiFi 連線（帶 NVS + AP 備援）
 // ============================
 void connectWiFi() {
   loadWiFiConfig();
 
   WiFi.mode(WIFI_STA);
-  Serial.printf("[WiFi] 連線到 %s", storedSSID);
+  Serial.printf("[WiFi] Connecting to %s", storedSSID);
   WiFi.begin(storedSSID, storedPassword);
   WiFi.setSleep(false);
 
@@ -442,41 +450,41 @@ void connectWiFi() {
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.printf("\n[OK] WiFi 已連線，IP: %s\n", WiFi.localIP().toString().c_str());
+    Serial.printf("\n[OK] WiFi connected, IP: %s\n", WiFi.localIP().toString().c_str());
     return;
   }
 
-  // 連線失敗 → 進入 AP 設定模式
-  Serial.println("\n[WARN] WiFi 連線失敗，進入設定模式...");
+  // Connection failed → enter AP setup mode / 連線失敗 → 進入 AP 設定模式
+  Serial.println("\n[WARN] WiFi connection failed, entering setup mode...");
   startAPMode();
 }
 
 // ============================
-// MQTT 回呼函式
+// MQTT callback / MQTT 回呼函式
 // ============================
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
   String message = "";
   for (unsigned int i = 0; i < length; i++) {
     message += (char)payload[i];
   }
-  Serial.printf("[MQTT] 收到指令: %s\n", message.c_str());
+  Serial.printf("[MQTT] Command received: %s\n", message.c_str());
 
   if (message == "capture") {
-    Serial.println("[MQTT] 執行遠端拍照...");
+    Serial.println("[MQTT] Executing remote capture...");
     captureAndUpload("remote");
     lastMotionTime = millis();
   } else if (message == "pause") {
     motionDetectionEnabled = false;
     resetMotionBaseline("pause");
-    Serial.println("[MQTT] ⏸ 動態偵測已暫停");
+    Serial.println("[MQTT] ⏸ Motion detection paused");
     sendStatusReport();
   } else if (message == "resume") {
     motionDetectionEnabled = true;
     resetMotionBaseline("resume");
-    Serial.println("[MQTT] ▶ 動態偵測已恢復");
+    Serial.println("[MQTT] ▶ Motion detection resumed");
     sendStatusReport();
   } else if (message == "reset_wifi") {
-    Serial.println("[MQTT] 收到重置 WiFi 指令，進入設定模式...");
+    Serial.println("[MQTT] WiFi reset command received, entering setup mode...");
     clearWiFiConfig();
     delay(1000);
     ESP.restart();
@@ -485,23 +493,23 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     int current = s->status.vflip;
     s->set_vflip(s, !current);
     resetMotionBaseline("flip");
-    Serial.printf("[MQTT] 🔄 畫面翻轉: %s\n", !current ? "ON" : "OFF");
+    Serial.printf("[MQTT] 🔄 Flip: %s\n", !current ? "ON" : "OFF");
     sendStatusReport();
   } else if (message == "mirror") {
     sensor_t* s = esp_camera_sensor_get();
     int current = s->status.hmirror;
     s->set_hmirror(s, !current);
     resetMotionBaseline("mirror");
-    Serial.printf("[MQTT] 🪞 畫面鏡像: %s\n", !current ? "ON" : "OFF");
+    Serial.printf("[MQTT] 🪞 Mirror: %s\n", !current ? "ON" : "OFF");
     sendStatusReport();
   } else if (message == "info") {
-    Serial.println("[MQTT] 回報系統狀態...");
+    Serial.println("[MQTT] Reporting system status...");
     sendStatusReport();
   } else if (message.startsWith("schedule ")) {
     String param = message.substring(9);
     if (param == "off") {
       scheduleEnabled = false;
-      Serial.println("[MQTT] ⏰ 排程靜音已關閉");
+      Serial.println("[MQTT] ⏰ Quiet hours disabled");
       sendStatusReport();
     } else {
       int h1, m1, h2, m2;
@@ -511,7 +519,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
         quietEndHour = h2;
         quietEndMin = m2;
         scheduleEnabled = true;
-        Serial.printf("[MQTT] ⏰ 排程靜音: %02d:%02d ~ %02d:%02d\n", h1, m1, h2, m2);
+        Serial.printf("[MQTT] ⏰ Quiet hours: %02d:%02d ~ %02d:%02d\n", h1, m1, h2, m2);
         sendStatusReport();
       }
     }
@@ -519,85 +527,86 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 }
 
 // ============================
-// MQTT 連線
+// MQTT connection / MQTT 連線
 // ============================
 void connectMQTT() {
-  espClient.setInsecure();  // HiveMQ Cloud 用 TLS，這裡跳過憑證驗證
-  mqttClient.setKeepAlive(120);  // 延長 keepalive 到 120 秒（預設 15 秒太短，上傳照片期間會斷線）
+  espClient.setInsecure();  // HiveMQ Cloud uses TLS, skip cert verification here
+  mqttClient.setKeepAlive(120);  // Extend keepalive to 120s (default 15s too short, disconnects during upload)
   mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
   mqttClient.setCallback(mqttCallback);
   mqttClient.setBufferSize(512);
 
   int retry = 0;
   while (!mqttClient.connected() && retry < 1) {
-    Serial.printf("[MQTT] 連線到 %s...\n", MQTT_BROKER);
+    Serial.printf("[MQTT] Connecting to %s...\n", MQTT_BROKER);
     if (mqttClient.connect(MQTT_CLIENT_ID, MQTT_USER, MQTT_PASSWORD)) {
-      Serial.println("[OK] MQTT 已連線");
+      Serial.println("[OK] MQTT connected");
       mqttClient.subscribe(MQTT_TOPIC_CMD);
-      Serial.printf("[OK] 已訂閱 %s\n", MQTT_TOPIC_CMD);
+      Serial.printf("[OK] Subscribed to %s\n", MQTT_TOPIC_CMD);
     } else {
-      Serial.printf("[ERROR] MQTT 連線失敗，rc=%d\n", mqttClient.state());
+      Serial.printf("[ERROR] MQTT connection failed, rc=%d\n", mqttClient.state());
       retry++;
     }
   }
 }
 
 // ============================
+// JPEG decode → grayscale → block averages (proper motion detection)
 // JPEG 解碼 → 灰階 → 區塊平均值（正確的動態偵測）
 // ============================
-// 參考：alanesq/CameraWifiMotion、s60sc/ESP32-CAM_MJPEG2SD
-// 原理：用 fmt2rgb888() 將 JPEG 解碼為 RGB 像素，轉灰階後做區塊比較
-// 舊方法（直接比較 JPEG raw bytes）會因 JPEG 壓縮每次不同而產生 60-70% 假變化
+// References: alanesq/CameraWifiMotion, s60sc/ESP32-CAM_MJPEG2SD
+// Approach: Use fmt2rgb888() to decode JPEG → RGB pixels, convert to grayscale, do block comparison
+// Old method (comparing JPEG raw bytes) produces 60-70% false positives due to compression variance
 
 bool decodeJpegToGrayBlocks(camera_fb_t* fb, uint8_t* blockBuffer) {
-  // --- 第一步：JPEG → RGB888（使用 esp32-camera 內建函式）---
-  // VGA(640x480) 需要 640*480*3 = 921,600 bytes，放在 PSRAM
+  // Step 1: JPEG → RGB888 (using esp32-camera built-in function)
+  // VGA(640x480) needs 640*480*3 = 921,600 bytes, stored in PSRAM
   size_t rgbLen = fb->width * fb->height * 3;
   uint8_t* rgbBuf = (uint8_t*)ps_malloc(rgbLen);
   if (!rgbBuf) {
-    Serial.println("[ERROR] PSRAM 不足，無法解碼 JPEG");
+    Serial.println("[ERROR] Insufficient PSRAM for JPEG decode");
     return false;
   }
 
-  // fmt2rgb888：esp32-camera 提供的 JPEG → RGB888 解碼器
+  // fmt2rgb888: JPEG → RGB888 decoder provided by esp32-camera
   bool ok = fmt2rgb888(fb->buf, fb->len, PIXFORMAT_JPEG, rgbBuf);
   if (!ok) {
-    Serial.println("[ERROR] JPEG 解碼失敗");
+    Serial.println("[ERROR] JPEG decode failed");
     free(rgbBuf);
     return false;
   }
 
-  // --- 第二步：RGB → 灰階，降採樣到 DETECT_WIDTH x DETECT_HEIGHT，計算區塊平均值 ---
-  int srcW = fb->width;   // 實際影像寬（如 640）
-  int srcH = fb->height;  // 實際影像高（如 480）
+  // Step 2: RGB → grayscale, downsample to DETECT_WIDTH x DETECT_HEIGHT, compute block averages
+  int srcW = fb->width;   // Actual image width (e.g. 640)
+  int srcH = fb->height;  // Actual image height (e.g. 480)
 
   int totalBlocks = blockCols * blockRows;
-  // 每個區塊對應原始影像的像素範圍
+  // Each block maps to a pixel range in the source image
   float scaleX = (float)srcW / DETECT_WIDTH;
   float scaleY = (float)srcH / DETECT_HEIGHT;
 
   for (int by = 0; by < blockRows; by++) {
     for (int bx = 0; bx < blockCols; bx++) {
-      // 這個區塊在原始影像中對應的像素範圍
+      // Pixel range this block maps to in the source image
       int startX = (int)(bx * BLOCK_SIZE * scaleX);
       int endX   = (int)((bx + 1) * BLOCK_SIZE * scaleX);
       int startY = (int)(by * BLOCK_SIZE * scaleY);
       int endY   = (int)((by + 1) * BLOCK_SIZE * scaleY);
 
-      // 限制範圍
+      // Clamp bounds / 限制範圍
       if (endX > srcW) endX = srcW;
       if (endY > srcH) endY = srcH;
 
-      // 計算區塊內所有像素的灰階平均值
+      // Calculate average grayscale value for all pixels in this block
       long sum = 0;
       int count = 0;
       for (int y = startY; y < endY; y++) {
         for (int x = startX; x < endX; x++) {
-          int idx = (y * srcW + x) * 3;  // RGB888: 每像素 3 bytes
+          int idx = (y * srcW + x) * 3;  // RGB888: 3 bytes per pixel
           uint8_t r = rgbBuf[idx];
           uint8_t g = rgbBuf[idx + 1];
           uint8_t b = rgbBuf[idx + 2];
-          // ITU-R BT.601 灰階轉換（人眼對綠色最敏感）
+          // ITU-R BT.601 grayscale conversion (human eye most sensitive to green)
           sum += (r * 77 + g * 150 + b * 29) >> 8;
           count++;
         }
@@ -616,18 +625,19 @@ void resetMotionBaseline(const char* reason) {
     free(prevFrame);
     prevFrame = NULL;
   }
-  Serial.printf("[MOTION] 重建偵測基準: %s\n", reason);
+  Serial.printf("[MOTION] Baseline reset: %s\n", reason);
 }
 
 // ============================
-// 偵測畫面差異
+// Detect frame difference / 偵測畫面差異
 // ============================
 bool detectMotion(camera_fb_t* fb) {
+  // Dark scene filter: very small JPEG = black frame (noise causes false motion)
   // 暗處防誤判：JPEG 檔太小表示畫面全黑（雜訊會造成假動態）
   if (fb->len < 3000) {
     static bool darkWarned = false;
     if (!darkWarned) {
-      Serial.printf("[INFO] 畫面太暗（%d bytes），暫停偵測\n", fb->len);
+      Serial.printf("[INFO] Scene too dark (%d bytes), skipping detection\n", fb->len);
       darkWarned = true;
     }
     return false;
@@ -635,27 +645,28 @@ bool detectMotion(camera_fb_t* fb) {
 
   int totalBlocks = blockCols * blockRows;
 
-  // 分配當前幀的區塊 buffer（放在 PSRAM）
+  // Allocate block buffer for current frame (in PSRAM)
   uint8_t* currentFrame = (uint8_t*)ps_malloc(totalBlocks);
   if (!currentFrame) {
-    Serial.println("[ERROR] 記憶體不足");
+    Serial.println("[ERROR] Out of memory");
     return false;
   }
 
-  // 解碼 JPEG 並計算區塊灰階值
+  // Decode JPEG and compute block grayscale values
   if (!decodeJpegToGrayBlocks(fb, currentFrame)) {
     free(currentFrame);
     return false;
   }
 
+  // First run, no previous frame to compare
   // 第一次執行，沒有前一幀可比對
   if (prevFrame == NULL) {
     prevFrame = currentFrame;
-    Serial.println("[INFO] 第一幀已儲存，下一幀開始比對");
+    Serial.println("[INFO] First frame stored, detection starts next frame");
     return false;
   }
 
-  // 比對區塊差異
+  // Compare block differences / 比對區塊差異
   int changedBlocks = 0;
   int strongBlocks = 0;
   long changedDiffSum = 0;
@@ -672,45 +683,47 @@ bool detectMotion(camera_fb_t* fb) {
     }
   }
 
-  // 計算變化百分比
+  // Calculate change percentage / 計算變化百分比
   float changePercent = (float)changedBlocks / totalBlocks * 100.0;
   float avgChangedDiff = changedBlocks > 0 ? (float)changedDiffSum / changedBlocks : 0.0;
 
-  // 除錯用：每 10 次輸出一次靜態變化率，方便校準門檻
+  // Debug: print static change rate every 10 frames for threshold calibration
   static int frameCount = 0;
   frameCount++;
   if (frameCount % 10 == 0) {
-    Serial.printf("[DEBUG] 變化: %.1f%%（%d/%d），強變化:%d，平均差:%.1f，最大差:%d\n",
+    Serial.printf("[DEBUG] Change: %.1f%% (%d/%d), strong:%d, avgDiff:%.1f, maxDiff:%d\n",
                   changePercent, changedBlocks, totalBlocks, strongBlocks, avgChangedDiff, maxDiff);
   }
 
   if (changePercent >= GLOBAL_CHANGE_IGNORE_PERCENT) {
-    Serial.printf("[MOTION] 忽略全畫面亮度變化 %.1f%%（疑似曝光/光線變化）\n", changePercent);
+    Serial.printf("[MOTION] Ignoring full-frame brightness change %.1f%% (likely exposure/lighting shift)\n", changePercent);
     free(prevFrame);
     prevFrame = currentFrame;
     return false;
   }
 
   if (changePercent > MOTION_PERCENT || strongBlocks >= MOTION_STRONG_BLOCKS) {
-    Serial.printf("[MOTION] 可疑動態，等待確認：變化 %.1f%%（%d/%d），強變化:%d，平均差:%.1f，最大差:%d\n",
+    Serial.printf("[MOTION] Suspicious motion, pending confirm: change %.1f%% (%d/%d), strong:%d, avgDiff:%.1f, maxDiff:%d\n",
                   changePercent, changedBlocks, totalBlocks, strongBlocks, avgChangedDiff, maxDiff);
     free(currentFrame);
     return true;
   }
 
-  // 只有在未觸發時才更新基準。可疑幀不覆蓋基準，讓第二階段確認仍能和原本背景比對。
+  // Only update baseline when no motion detected. Suspicious frames don't overwrite,
+  // so second-stage confirm can still compare against the original background.
+  // 只在未觸發時更新基準，可疑幀不覆蓋，讓二階段確認仍能和原本背景比對。
   free(prevFrame);
   prevFrame = currentFrame;
   return false;
 }
 
 // ============================
-// 拍照並上傳（核心函式）
+// Capture and upload (core function) / 拍照並上傳（核心函式）
 // ============================
 void captureAndUpload(const char* trigger) {
-  Serial.printf("[CAPTURE] 觸發來源: %s\n", trigger);
+  Serial.printf("[CAPTURE] Trigger: %s\n", trigger);
 
-  // LED 快閃表示正在拍照
+  // LED flash to indicate capture / LED 快閃表示正在拍照
   for (int i = 0; i < 3; i++) {
     setStatusLed(255);
     delay(50);
@@ -718,56 +731,57 @@ void captureAndUpload(const char* trigger) {
     delay(50);
   }
 
-  // 已經在 SVGA 解析度，不需要切換
-  // 丟棄一幀讓感測器穩定
+  // Already at SVGA resolution, no switch needed
+  // Discard one frame to let sensor stabilize / 丟棄一幀讓感測器穩定
   delay(400);
-  camera_fb_t* discard = getCameraFrameWithRetry(5, 250, "拍照前丟棄幀");
+  camera_fb_t* discard = getCameraFrameWithRetry(5, 250, "pre-capture discard");
   if (discard) esp_camera_fb_return(discard);
   delay(300);
 
-  // 連拍 3 張，用混合分數選最佳照片：
-  // 變化區域比例 + 強變化區塊數 + JPEG 檔案大小（清晰度近似）
+  // Burst 3 shots, pick best using composite score:
+  // change area ratio + strong change blocks + JPEG file size (sharpness proxy)
+  // 連拍 3 張，用混合分數選最佳：變化比例 + 強變化區塊 + JPEG 大小（清晰度近似）
   camera_fb_t* bestPhoto = NULL;
   float bestScore = -1.0;
 
   for (int i = 0; i < 3; i++) {
-    camera_fb_t* fb = getCameraFrameWithRetry(5, 250, "連拍");
+    camera_fb_t* fb = getCameraFrameWithRetry(5, 250, "burst");
     if (!fb) {
-      Serial.printf("[ERROR] 第 %d 張拍攝失敗\n", i + 1);
+      Serial.printf("[ERROR] Shot %d capture failed\n", i + 1);
       continue;
     }
     float changePercent = 0.0;
     int strongBlocks = 0;
     float score = scorePhotoCandidate(fb, &changePercent, &strongBlocks);
 
-    Serial.printf("[CAPTURE] 第 %d 張: %d bytes, 變化 %.1f%%, 強變化 %d, 分數 %.1f\n",
+    Serial.printf("[CAPTURE] Shot %d: %d bytes, change %.1f%%, strong %d, score %.1f\n",
                   i + 1, fb->len, changePercent, strongBlocks, score);
 
     if (score > bestScore) {
-      // 釋放之前的最佳照片
+      // Release previous best / 釋放之前的最佳照片
       if (bestPhoto) esp_camera_fb_return(bestPhoto);
       bestPhoto = fb;
       bestScore = score;
     } else {
       esp_camera_fb_return(fb);
     }
-    delay(200);  // 短暫間隔讓感測器穩定
+    delay(200);  // Short interval for sensor stabilization
   }
 
   if (!bestPhoto) {
-    Serial.println("[ERROR] 所有拍攝都失敗");
+    Serial.println("[ERROR] All captures failed");
     return;
   }
 
-  Serial.printf("[CAPTURE] 選擇最佳照片: %d bytes, 分數 %.1f\n", bestPhoto->len, bestScore);
+  Serial.printf("[CAPTURE] Best photo selected: %d bytes, score %.1f\n", bestPhoto->len, bestScore);
 
-  // 上傳到 Cloudflare Worker
+  // Upload to Cloudflare Worker
   uploadPhoto(bestPhoto, trigger);
 
-  // 釋放照片
+  // Release photo / 釋放照片
   esp_camera_fb_return(bestPhoto);
 
-  // LED 長亮 1 秒表示完成
+  // LED on for 1s to indicate completion / LED 長亮 1 秒表示完成
   setStatusLed(255);
   delay(1000);
   setStatusLed(0);
@@ -776,34 +790,34 @@ void captureAndUpload(const char* trigger) {
 }
 
 // ============================
-// HTTP 上傳照片到 Worker
+// HTTP upload photo to Worker / HTTP 上傳照片到 Worker
 // ============================
 void uploadPhoto(camera_fb_t* fb, const char* trigger) {
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[ERROR] WiFi 未連線，無法上傳");
+    Serial.println("[ERROR] WiFi not connected, cannot upload");
     return;
   }
 
   Serial.printf("[UPLOAD] Free heap: %d, PSRAM: %d\n", ESP.getFreeHeap(), ESP.getFreePsram());
 
   WiFiClientSecure client;
-  client.setInsecure();  // Cloudflare Workers 用公開 TLS
-  client.setTimeout(30);  // 30 秒 TLS 逾時
+  client.setInsecure();  // Cloudflare Workers use public TLS
+  client.setTimeout(30);  // 30s TLS timeout
 
   HTTPClient http;
-  http.begin(client, WORKER_URL);  // HTTPS 需要 WiFiClientSecure
+  http.begin(client, WORKER_URL);  // HTTPS requires WiFiClientSecure
   http.addHeader("Content-Type", "image/jpeg");
-  http.addHeader("X-Trigger", trigger);  // 告訴 Worker 觸發來源
-  http.setTimeout(30000);  // 30 秒逾時（ESP32 TLS 握手慢）
+  http.addHeader("X-Trigger", trigger);  // Tell Worker the trigger source
+  http.setTimeout(30000);  // 30s timeout (ESP32 TLS handshake is slow)
 
-  Serial.printf("[UPLOAD] 正在上傳 %d bytes 到 Worker...\n", fb->len);
+  Serial.printf("[UPLOAD] Uploading %d bytes to Worker...\n", fb->len);
   int httpCode = http.POST(fb->buf, fb->len);
 
   if (httpCode > 0) {
     String response = http.getString();
-    Serial.printf("[UPLOAD] 回應碼: %d, 內容: %s\n", httpCode, response.c_str());
+    Serial.printf("[UPLOAD] Response: HTTP %d, body: %s\n", httpCode, response.c_str());
   } else {
-    Serial.printf("[ERROR] 上傳失敗: %s\n", http.errorToString(httpCode).c_str());
+    Serial.printf("[ERROR] Upload failed: %s\n", http.errorToString(httpCode).c_str());
   }
 
   http.end();
@@ -823,10 +837,10 @@ void waitWithCommandPolling(unsigned long durationMs) {
 }
 
 void captureAlarmSequence() {
-  Serial.printf("[ALARM] 門口警報事件開始，將保留 %d 張記錄\n", ALARM_SEQUENCE_SHOTS);
+  Serial.printf("[ALARM] Door alarm event started, capturing %d shots\n", ALARM_SEQUENCE_SHOTS);
 
   for (int i = 0; i < ALARM_SEQUENCE_SHOTS; i++) {
-    Serial.printf("[ALARM] 事件記錄 %d/%d\n", i + 1, ALARM_SEQUENCE_SHOTS);
+    Serial.printf("[ALARM] Event record %d/%d\n", i + 1, ALARM_SEQUENCE_SHOTS);
     captureAndUpload("motion");
 
     if (i < ALARM_SEQUENCE_SHOTS - 1) {
@@ -835,11 +849,11 @@ void captureAlarmSequence() {
   }
 
   lastMotionTime = millis();
-  Serial.printf("[ALARM] 事件記錄完成，短冷卻 %d 秒\n", COOLDOWN_MS / 1000);
+  Serial.printf("[ALARM] Event complete, cooldown %d seconds\n", COOLDOWN_MS / 1000);
 }
 
 // ============================
-// LED 呼吸燈（待機狀態）
+// LED breathing effect (standby indicator) / LED 呼吸燈（待機狀態）
 // ============================
 void ledBreath() {
   static unsigned long lastUpdate = 0;
@@ -850,12 +864,12 @@ void ledBreath() {
     lastUpdate = millis();
     brightness += direction;
     if (brightness >= 255 || brightness <= 0) direction = -direction;
-    setStatusLed(brightness);  // ESP32 用 LEDC 取代 analogWrite
+    setStatusLed(brightness);
   }
 }
 
 // ============================
-// 檢查是否在排程靜音時段
+// Check if in quiet hours / 檢查是否在排程靜音時段
 // ============================
 bool isInQuietHours() {
   if (!scheduleEnabled) return false;
@@ -868,16 +882,16 @@ bool isInQuietHours() {
   int endMin = quietEndHour * 60 + quietEndMin;
 
   if (startMin <= endMin) {
-    // 同一天內（如 08:00-18:00）
+    // Same day (e.g. 08:00-18:00) / 同一天內
     return nowMin >= startMin && nowMin < endMin;
   } else {
-    // 跨午夜（如 23:00-07:00）
+    // Crosses midnight (e.g. 23:00-07:00) / 跨午夜
     return nowMin >= startMin || nowMin < endMin;
   }
 }
 
 // ============================
-// 發送系統狀態報告到 Worker → Telegram
+// Send status report to Worker → Telegram / 發送系統狀態報告
 // ============================
 void sendStatusReport() {
   struct tm timeinfo;
@@ -934,7 +948,7 @@ void sendStatusReport() {
   http.addHeader("Content-Type", "application/json");
   http.setTimeout(10000);
   int code = http.POST((uint8_t*)report, strlen(report));
-  Serial.printf("[STATUS] 回報結果: HTTP %d\n", code);
+  Serial.printf("[STATUS] Report result: HTTP %d\n", code);
   http.end();
 }
 
@@ -942,24 +956,23 @@ void sendStatusReport() {
 // setup()
 // ============================
 void setup() {
-  WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);  // 停用欠壓偵測
+  WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);  // Disable brownout detector / 停用欠壓偵測
 
   Serial.begin(115200);
   Serial.println("\n=============================");
-  Serial.println("  EasyCam 感應監視器 v1.0");
-  Serial.println("  NMKing 小霸王實驗室");
+  Serial.println("  EasyCam Motion Monitor v1.0");
   Serial.println("=============================\n");
 
-  // LED 設定（ESP32 用 LEDC PWM）
+  // LED setup (ESP32 uses LEDC PWM)
   initStatusLed();
 
+  // Capture button IO3 shares with Serial RX; OK in monitor mode since we don't read Serial input
   // 拍照按鈕 IO3 與 Serial RX 共用，監控模式下不用 Serial 輸入所以可以用
-  // 注意：如果 Serial Monitor 送資料進來可能會誤觸發
   pinMode(BUTTON_PIN, INPUT_PULLUP);
 
-  // 初始化相機
+  // Initialize camera / 初始化相機
   if (!initCamera()) {
-    Serial.println("[FATAL] 相機初始化失敗，系統停止");
+    Serial.println("[FATAL] Camera init failed, system halted");
     while (1) {
       setStatusLed(255);
       delay(200);
@@ -968,38 +981,39 @@ void setup() {
     }
   }
 
-  // 計算區塊網格
+  // Calculate block grid / 計算區塊網格
   blockCols = DETECT_WIDTH / BLOCK_SIZE;   // 40
   blockRows = DETECT_HEIGHT / BLOCK_SIZE;  // 30
-  Serial.printf("[INFO] 偵測網格: %dx%d = %d 區塊\n", blockCols, blockRows, blockCols * blockRows);
+  Serial.printf("[INFO] Detection grid: %dx%d = %d blocks\n", blockCols, blockRows, blockCols * blockRows);
 
-  // 連線 WiFi
+  // Connect WiFi / 連線 WiFi
   connectWiFi();
 
+  // Connect MQTT (disabled by default; main command channel is Worker /poll)
   // 連線 MQTT（目前預設關閉，主要指令通道是 Worker /poll）
 #if ENABLE_MQTT_COMMANDS
   connectMQTT();
 #else
-  Serial.println("[INFO] MQTT 指令通道已停用，使用 Worker /poll 輪詢");
+  Serial.println("[INFO] MQTT commands disabled, using Worker /poll");
 #endif
 
-  // 設定 NTP 時間（排程功能需要）
+  // Set NTP time (needed for scheduling) / 設定 NTP 時間（排程功能需要）
   configTime(8 * 3600, 0, "pool.ntp.org", "time.nist.gov");
   bootTime = millis();
 
-  // LED 亮一下表示就緒
+  // LED on briefly to indicate ready / LED 亮一下表示就緒
   setStatusLed(255);
   delay(2000);
   setStatusLed(0);
 
-  Serial.println("\n[READY] 系統就緒，開始監控...\n");
+  Serial.println("\n[READY] System ready, monitoring started...\n");
 }
 
 // ============================
 // loop()
 // ============================
 void loop() {
-  // 維持 MQTT 連線（選用；避免 HiveMQ 不通時阻塞主要輪詢通道）
+  // Maintain MQTT connection (optional; avoids blocking main poll channel if HiveMQ is unreachable)
 #if ENABLE_MQTT_COMMANDS
   if (!mqttClient.connected()) {
     connectMQTT();
@@ -1007,43 +1021,46 @@ void loop() {
   mqttClient.loop();
 #endif
 
-  // WiFi 斷線重連
+  // WiFi reconnect / WiFi 斷線重連
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[WARN] WiFi 斷線，重新連線...");
+    Serial.println("[WARN] WiFi disconnected, reconnecting...");
     connectWiFi();
   }
 
-  // 輪詢 Worker 指令：每 3 秒檢查一次（主要指令通道）
-  // 放在動態偵測前，確保冷卻期間也能收到 Telegram 指令。
+  // Poll Worker commands: check every 3s (main command channel)
+  // Placed before motion detection so commands are received even during cooldown.
+  // 輪詢 Worker 指令：每 3 秒，放在偵測前，冷卻期間也能收到指令。
   static unsigned long lastPoll = 0;
   if (WiFi.status() == WL_CONNECTED && millis() - lastPoll > 3000) {
     lastPoll = millis();
     pollWorkerCommand();
   }
 
+  // Check physical capture button (IO3, active LOW)
   // 檢查實體拍照按鈕（IO3，低電位觸發）
   if (digitalRead(BUTTON_PIN) == LOW) {
-    delay(50);  // 去彈跳
+    delay(50);  // Debounce / 去彈跳
     if (digitalRead(BUTTON_PIN) == LOW) {
-      Serial.println("[BUTTON] 按鈕觸發拍照");
+      Serial.println("[BUTTON] Button triggered capture");
       captureAndUpload("button");
-      // 等待按鈕放開
+      // Wait for button release / 等待按鈕放開
       while (digitalRead(BUTTON_PIN) == LOW) delay(10);
-      lastMotionTime = millis();  // 重置冷卻
+      lastMotionTime = millis();  // Reset cooldown
     }
   }
 
+  // Motion detection (auto-skipped during quiet hours)
   // 畫面差異偵測（排程靜音時段自動跳過）
   if (motionDetectionEnabled && !isInQuietHours()) {
     if (millis() - bootTime < MOTION_STARTUP_GRACE_MS) {
-      ledBreath();  // 開機後先讓曝光穩定
+      ledBreath();  // Startup grace period for exposure stabilization / 開機曝光穩定期
     }
-    // 冷卻中就跳過
+    // Skip during cooldown / 冷卻中跳過
     else if (millis() - lastMotionTime < COOLDOWN_MS) {
-      ledBreath();  // 冷卻中顯示呼吸燈
+      ledBreath();  // Breathing LED during cooldown / 冷卻中呼吸燈
     } else {
-      // 拍一幀做偵測
-      camera_fb_t* fb = getCameraFrameWithRetry(3, 150, "偵測");
+      // Capture one frame for detection / 拍一幀做偵測
+      camera_fb_t* fb = getCameraFrameWithRetry(3, 150, "detect");
       if (fb) {
         bool suspiciousMotion = detectMotion(fb);
         esp_camera_fb_return(fb);
@@ -1051,16 +1068,16 @@ void loop() {
         if (suspiciousMotion) {
           waitWithCommandPolling(MOTION_CONFIRM_DELAY_MS);
 
-          camera_fb_t* confirmFb = getCameraFrameWithRetry(3, 150, "二階段確認");
+          camera_fb_t* confirmFb = getCameraFrameWithRetry(3, 150, "confirm");
           if (confirmFb) {
             bool confirmedMotion = detectMotion(confirmFb);
             esp_camera_fb_return(confirmFb);
 
             if (confirmedMotion) {
-              Serial.println("[MOTION] 二階段確認通過，啟動門口警報事件");
+              Serial.println("[MOTION] Second-stage confirmed, triggering door alarm event");
               captureAlarmSequence();
             } else {
-              Serial.println("[MOTION] 二階段確認未通過，忽略本次可疑變化");
+              Serial.println("[MOTION] Second-stage not confirmed, ignoring suspicious change");
             }
           }
         }
@@ -1068,6 +1085,7 @@ void loop() {
     }
   }
 
+  // Standby LED: brief flash every 3s to indicate normal operation
   // 待機 LED 微閃（每 3 秒閃一下表示正常運作）
   static unsigned long lastBlink = 0;
   if (millis() - lastBlink > 3000) {
@@ -1077,11 +1095,11 @@ void loop() {
     setStatusLed(0);
   }
 
-  delay(200);  // 偵測間隔（每秒約 5 幀偵測）
+  delay(200);  // Detection interval (~5 fps) / 偵測間隔（每秒約 5 幀）
 }
 
 // ============================
-// 輪詢 Worker 指令（MQTT 備用方案）
+// Poll Worker commands (MQTT fallback) / 輪詢 Worker 指令（MQTT 備用方案）
 // ============================
 void pollWorkerCommand() {
   WiFiClientSecure client;
@@ -1094,6 +1112,7 @@ void pollWorkerCommand() {
   int httpCode = http.GET();
   if (httpCode == 200) {
     String response = http.getString();
+    // Parse command field, reuse mqttCallback for unified handling
     // 解析 command 欄位，統一交給 mqttCallback 處理
     int cmdStart = response.indexOf("\"command\":\"");
     if (cmdStart >= 0) {
@@ -1101,14 +1120,14 @@ void pollWorkerCommand() {
       int cmdEnd = response.indexOf("\"", cmdStart);
       if (cmdEnd > cmdStart) {
         String cmd = response.substring(cmdStart, cmdEnd);
-        Serial.printf("[POLL] 收到指令: %s\n", cmd.c_str());
+        Serial.printf("[POLL] Command received: %s\n", cmd.c_str());
         mqttCallback((char*)"easycam/cmd", (byte*)cmd.c_str(), cmd.length());
       }
     }
   } else if (httpCode < 0) {
-    Serial.printf("[POLL] 輪詢失敗: %s\n", http.errorToString(httpCode).c_str());
+    Serial.printf("[POLL] Poll failed: %s\n", http.errorToString(httpCode).c_str());
   } else {
-    Serial.printf("[POLL] Worker 回應 HTTP %d\n", httpCode);
+    Serial.printf("[POLL] Worker responded HTTP %d\n", httpCode);
   }
   http.end();
 }
